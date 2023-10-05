@@ -7,6 +7,7 @@ use DTApi\Http\Requests;
 use DTApi\Models\Distance;
 use Illuminate\Http\Request;
 use DTApi\Repository\BookingRepository;
+use Illuminate\Http\JsonResponse;
 
 /**
  * Class BookingController
@@ -35,17 +36,24 @@ class BookingController extends Controller
      */
     public function index(Request $request)
     {
-        if($user_id = $request->get('user_id')) {
+        $user = $request->__authenticatedUser;
 
+        if ($user_id = $request->user_id) {
             $response = $this->repository->getUsersJobs($user_id);
-
-        }
-        elseif($request->__authenticatedUser->user_type == env('ADMIN_ROLE_ID') || $request->__authenticatedUser->user_type == env('SUPERADMIN_ROLE_ID'))
-        {
+        } elseif ($this->isAdminOrSuperadmin($user)) {
             $response = $this->repository->getAll($request);
+        } else {
+            // Handle other cases or return an error response if needed
+            $response = ['message' => 'Unauthorized'];
         }
 
         return response($response);
+    }
+
+    protected function isAdminOrSuperadmin($user)
+    {
+        $users = Users::whereIn('role',['admin','super_admin'])->get();
+        return in_array($user->user_type, $users);
     }
 
     /**
@@ -54,9 +62,8 @@ class BookingController extends Controller
      */
     public function show($id)
     {
-        $job = $this->repository->with('translatorJobRel.user')->find($id);
-
-        return response($job);
+        $job = $this->repository->with('translatorJobRel.user')->findOrFail($id);
+        return new JsonResponse($job);
     }
 
     /**
@@ -65,12 +72,24 @@ class BookingController extends Controller
      */
     public function store(Request $request)
     {
-        $data = $request->all();
-
-        $response = $this->repository->store($request->__authenticatedUser, $data);
-
-        return response($response);
-
+        $validatedData = $request->validate([
+            // Define your validation rules here.
+        ]);
+    
+        $user = $request->user();
+    
+        // Use a try-catch block to handle exceptions and provide appropriate responses.
+        try {
+            // Call the repository's store method and pass in the user and validated data.
+            $response = $this->repository->store($user, $validatedData);
+            
+            // Return a success JSON response with a 201 (Created) status code.
+            return new JsonResponse($response, 201);
+        } catch (\Exception $e) {
+            // Handle any exceptions that may occur during the store operation.
+            // You can log the error, return a custom error message, or use a 500 status code.
+            return new JsonResponse(['error' => $e->getMessage()], 500);
+        }
     }
 
     /**
@@ -107,13 +126,26 @@ class BookingController extends Controller
      */
     public function getHistory(Request $request)
     {
-        if($user_id = $request->get('user_id')) {
+        $user_id = $request->input('user_id');
 
-            $response = $this->repository->getUsersJobsHistory($user_id, $request);
-            return response($response);
+        if (!$user_id) {
+            // If 'user_id' is not provided in the request, return a 400 (Bad Request) response.
+            return new JsonResponse(['error' => 'Missing user_id parameter.'], 400);
         }
 
-        return null;
+        try {
+            $response = $this->repository->getUsersJobsHistory($user_id, $request);
+            // Check if the response is empty, and return a 404 (Not Found) response if needed.
+            if (empty($response)) {
+                return new JsonResponse(['error' => 'No job history found for the specified user.'], 404);
+            }
+            // Return a successful JSON response with the job history data.
+            return new JsonResponse($response);
+        } catch (\Exception $e) {
+            // Handle any exceptions that may occur during the retrieval process.
+            // You can log the error, return a custom error message, or use a 500 status code.
+            return new JsonResponse(['error' => $e->getMessage()], 500);
+        }
     }
 
     /**
@@ -195,63 +227,40 @@ class BookingController extends Controller
     public function distanceFeed(Request $request)
     {
         $data = $request->all();
+        $jobid = $data['jobid'] ?? null;
 
-        if (isset($data['distance']) && $data['distance'] != "") {
-            $distance = $data['distance'];
-        } else {
-            $distance = "";
-        }
-        if (isset($data['time']) && $data['time'] != "") {
-            $time = $data['time'];
-        } else {
-            $time = "";
-        }
-        if (isset($data['jobid']) && $data['jobid'] != "") {
-            $jobid = $data['jobid'];
+        $updates = [];
+
+        // Check for distance and time updates.
+        if (isset($data['distance'])) {
+            $updates['distance'] = $data['distance'];
         }
 
-        if (isset($data['session_time']) && $data['session_time'] != "") {
-            $session = $data['session_time'];
-        } else {
-            $session = "";
+        if (isset($data['time'])) {
+            $updates['time'] = $data['time'];
         }
 
-        if ($data['flagged'] == 'true') {
-            if($data['admincomment'] == '') return "Please, add comment";
-            $flagged = 'yes';
-        } else {
-            $flagged = 'no';
-        }
-        
-        if ($data['manually_handled'] == 'true') {
-            $manually_handled = 'yes';
-        } else {
-            $manually_handled = 'no';
-        }
+        // Check for flagged, manually_handled, and by_admin updates.
+        $updates['flagged'] = $data['flagged'] === 'true' ? 'yes' : 'no';
+        $updates['manually_handled'] = $data['manually_handled'] === 'true' ? 'yes' : 'no';
+        $updates['by_admin'] = $data['by_admin'] === 'true' ? 'yes' : 'no';
 
-        if ($data['by_admin'] == 'true') {
-            $by_admin = 'yes';
-        } else {
-            $by_admin = 'no';
+        // Check for admincomment and session_time updates.
+        $updates['admin_comments'] = isset($data['admincomment']) ? $data['admincomment'] : '';
+        $updates['session_time'] = isset($data['session_time']) ? $data['session_time'] : '';
+
+        // Check if flagged is 'true' and admincomment is empty.
+        if ($updates['flagged'] === 'yes' && empty($updates['admin_comments'])) {
+            return new JsonResponse(['error' => 'Please, add comment'], 400);
         }
 
-        if (isset($data['admincomment']) && $data['admincomment'] != "") {
-            $admincomment = $data['admincomment'];
-        } else {
-            $admincomment = "";
-        }
-        if ($time || $distance) {
-
-            $affectedRows = Distance::where('job_id', '=', $jobid)->update(array('distance' => $distance, 'time' => $time));
+        // Update the Distance and Job models with the merged updates if jobid is provided.
+        if ($jobid) {
+            $affectedRows = Distance::where('job_id', '=', $jobid)->update($updates);
+            $affectedRows1 = Job::where('id', '=', $jobid)->update($updates);
         }
 
-        if ($admincomment || $session || $flagged || $manually_handled || $by_admin) {
-
-            $affectedRows1 = Job::where('id', '=', $jobid)->update(array('admin_comments' => $admincomment, 'flagged' => $flagged, 'session_time' => $session, 'manually_handled' => $manually_handled, 'by_admin' => $by_admin));
-
-        }
-
-        return response('Record updated!');
+        return new JsonResponse(['message' => 'Record updated!']);
     }
 
     public function reopen(Request $request)
@@ -265,11 +274,27 @@ class BookingController extends Controller
     public function resendNotifications(Request $request)
     {
         $data = $request->all();
-        $job = $this->repository->find($data['jobid']);
-        $job_data = $this->repository->jobToData($job);
-        $this->repository->sendNotificationTranslator($job, $job_data, '*');
-
-        return response(['success' => 'Push sent']);
+        $jobid = $data['jobid'] ?? null;
+    
+        if (!$jobid) {
+            return new JsonResponse(['error' => 'Missing jobid parameter.'], 400);
+        }
+    
+        // Use try-catch to handle potential exceptions when finding the job.
+        try {
+            $job = $this->repository->find($jobid);
+            if (!$job) {
+                return new JsonResponse(['error' => 'Job not found.'], 404);
+            }
+    
+            $job_data = $this->repository->jobToData($job);
+            $this->repository->sendNotificationTranslator($job, $job_data, '*');
+    
+            return new JsonResponse(['success' => 'Push sent']);
+        } catch (\Exception $e) {
+            // Handle any exceptions that may occur during the process.
+            return new JsonResponse(['error' => $e->getMessage()], 500);
+        }
     }
 
     /**
@@ -280,14 +305,26 @@ class BookingController extends Controller
     public function resendSMSNotifications(Request $request)
     {
         $data = $request->all();
-        $job = $this->repository->find($data['jobid']);
-        $job_data = $this->repository->jobToData($job);
+        $jobid = $data['jobid'] ?? null;
 
+        if (!$jobid) {
+            return new JsonResponse(['error' => 'Missing jobid parameter.'], 400);
+        }
+
+        // Use try-catch to handle potential exceptions when finding the job.
         try {
-            $this->repository->sendSMSNotificationToTranslator($job);
-            return response(['success' => 'SMS sent']);
+            $job = $this->repository->find($jobid);
+            if (!$job) {
+                return new JsonResponse(['error' => 'Job not found.'], 404);
+            }
+
+            $job_data = $this->repository->jobToData($job);
+            $this->repository->sendSMSNotificationToTranslator($job, $job_data, '*');
+
+            return new JsonResponse(['success' => 'SMS sent']);
         } catch (\Exception $e) {
-            return response(['success' => $e->getMessage()]);
+            // Handle any exceptions that may occur during the process.
+            return new JsonResponse(['error' => $e->getMessage()], 500);
         }
     }
 
